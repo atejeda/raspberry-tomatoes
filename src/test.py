@@ -15,18 +15,15 @@ from collections import OrderedDict
 import jwt
 import paho.mqtt.client as mqtt
 
-
 # QoS Guarantee
 #  0  No guarantee (best effort only), even when the request returns OK
 #  1  At-least-once delivery guaranteed if the sendCommandtoDevice request returns OK
-
 
 # global variables
 
 logger = logging.getLogger(__name__)
 
 connection_event = threading.Event()
-
 
 # helper functions
 
@@ -48,44 +45,39 @@ def create_jwt(project_id, private_key_file, algorithm):
 
     return jwt.encode(token, private_key_str, algorithm=algorithm)
 
-
 # defaul mqtt callbacks
-
 
 def error_str(rc):
     return '{}: {}'.format(rc, mqtt.error_string(rc))
 
 
-def callback_connect(unused_client, unused_userdata, unused_flags, rc):
+def callback_connect(client, userdata, unused_flags, rc):
     logger.info('callback_connect => %s', mqtt.connack_string(rc))
     connection_event.set()
 
 
-def callback_disconnect(unused_client, unused_userdata, rc):
+def callback_disconnect(client, userdata, rc):
     logger.info('callback_disconnect => %s', error_str(rc))
 
 
-def callback_subscribe(unused_client, unused_userdata, mid, granted_qos):
+def callback_subscribe(client, userdata, mid, granted_qos):
     logger.debug('callback_subscribe => mid {}, qos {}'.format(mid, granted_qos))
 
 
-def callback_publish(unused_client, unused_userdata, unused_mid):
+def callback_publish(client, userdata, unused_mid):
     logger.debug('callback_publish')
 
 
-def callback_message(unused_client, unused_userdata, message):
-    # payload = str(message.payload.decode('utf-8'))
-    # logger.info(
-    #     'callback_message => \'%s\' on topic \'%s\' with Qos %s',
-    #     payload, 
-    #     message.topic, 
-    #     str(message.qos)
-    # )
-    pass
-
+def callback_message(client, userdata, message):
+    payload = str(message.payload.decode('utf-8'))
+    logger.info(
+        'callback_message => \'%s\' on topic \'%s\' with Qos %s',
+        payload, 
+        message.topic, 
+        str(message.qos)
+    )
 
 # mqtt client
-
 
 def build_client(
     project_id, 
@@ -165,9 +157,7 @@ def build_client(
 
     return client
 
-
 # device attach
-
 
 def attach_device(client, device, auth=''):
     topic = "/devices/{}/attach".format(device)
@@ -186,9 +176,7 @@ def reattach_device(client, device):
     detach_device(client, device)
     attach_device(client, device)
 
-
 # client loop
-
 
 def client_loop_thread(client):
     while True:
@@ -198,12 +186,11 @@ def client_loop_thread(client):
         # logging.info('waiting on connection...')
         # time.sleep(1)
 
-
 # main
 
 # specific gateway callbacks
 
-def callback_config_gateway(unused_client, unused_userdata, message):
+def callback_config_gateway(client, userdata, message):
     payload = str(message.payload.decode('utf-8'))
     logger.info(
         'callback_config_gateway => \'%s\' on topic \'%s\' with Qos %s',
@@ -212,7 +199,7 @@ def callback_config_gateway(unused_client, unused_userdata, message):
         str(message.qos)
     )
 
-def callback_error_gateway(unused_client, unused_userdata, message):
+def callback_error_gateway(client, userdata, message):
     payload = str(message.payload.decode('utf-8'))
     logger.info(
         'callback_errors_gateway => \'%s\' on topic \'%s\' with Qos %s',
@@ -221,7 +208,7 @@ def callback_error_gateway(unused_client, unused_userdata, message):
         str(message.qos)
     )
 
-def callback_command_gateway(unused_client, unused_userdata, message):
+def callback_command_gateway(client, userdata, message):
     payload = str(message.payload.decode('utf-8'))
     logger.info(
         'callback_commands_gateway => \'%s\' on topic \'%s\' with Qos %s',
@@ -230,7 +217,7 @@ def callback_command_gateway(unused_client, unused_userdata, message):
         str(message.qos)
     )
 
-def callback_config_sensor(unused_client, unused_userdata, message):
+def callback_config_sensor(client, userdata, message):
     payload = str(message.payload.decode('utf-8'))
     logger.info(
         'callback_config_sensor => \'%s\' on topic \'%s\' with Qos %s',
@@ -239,7 +226,7 @@ def callback_config_sensor(unused_client, unused_userdata, message):
         str(message.qos)
     )
 
-def callback_error_sensor(unused_client, unused_userdata, message):
+def callback_error_sensor(client, userdata, message):
     payload = str(message.payload.decode('utf-8'))
     logger.info(
         'callback_error_sensor => \'%s\' on topic \'%s\' with Qos %s',
@@ -248,7 +235,7 @@ def callback_error_sensor(unused_client, unused_userdata, message):
         str(message.qos)
     )
 
-def callback_command_sensor(unused_client, unused_userdata, message):
+def callback_command_sensor(client, userdata, message):
     payload = str(message.payload.decode('utf-8'))
     logger.info(
         'callback_command_sensor => \'%s\' on topic \'%s\' with Qos %s',
@@ -258,8 +245,6 @@ def callback_command_sensor(unused_client, unused_userdata, message):
     )
 
 # specific devices callbacks
-
-
 
 if __name__ == '__main__':
 
@@ -357,9 +342,9 @@ if __name__ == '__main__':
 
     logger.info('attaching devices to the gateway...')
 
-    # for device in devices:
-    #     if device == gateway_id: continue
-    #     attach_device(client, device)
+    for device in devices:
+        if device == gateway_id: continue
+        attach_device(client, device)
 
     time.sleep(3)
 
