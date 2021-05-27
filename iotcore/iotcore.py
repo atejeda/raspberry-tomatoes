@@ -1,7 +1,13 @@
+#!/usr/bin/env python
+
+# -*- coding: utf-8 -*-
+
+import sys
+if sys.version_info[0] < 3: 
+    raise Exception('python >= 3.x supported')
+
 import os
-import ssl
 import time
-import pytz
 import random
 import datetime
 import logging
@@ -9,19 +15,46 @@ import argparse
 import threading
 import requests
 import tempfile
+import pathlib
 
 from collections import OrderedDict
 
-import jwt
-import paho.mqtt.client as mqtt
-
-# QoS Guarantee
-#  0  No guarantee (best effort only), even when the request returns OK
-#  1  At-least-once delivery guaranteed if the sendCommandtoDevice request returns OK
-
-# global variables
+logging.basicConfig(format='%(asctime)-15s : %(message)s')
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+basepath = pathlib.Path(__file__).resolve().absolute().parent
+
+try:
+    import pytz
+    import jwt
+    import ssl
+    import paho.mqtt.client as mqtt
+    # import cv2
+
+    # from google.cloud import storage
+except:
+    logging.exception(
+        'missing requirements, install %s', 
+        basepath.joinpath('requirements.txt').as_posix()
+    )
+    sys.exit(1)
+
+#
+# QoS Guarantee
+#
+#  0  No guarantee (best effort only)
+#     even when the request returns OK
+#
+#  1  At-least-once delivery guaranteed 
+#     if the sendCommandtoDevice request returns OK
+#
+
+# global variables (possibly modified by some functions)
+
+tz = pytz.timezone('America/Santiago')
+tz = pytz.timezone('UTC')
 
 connection_event = threading.Event()
 
@@ -179,13 +212,45 @@ def reattach_device(client, device):
 # client loop
 
 def client_loop_thread(client):
-    while True:
-        client.loop_forever()
-        # if connection_event.is_set():
-        #     break
-        # logging.info('waiting on connection...')
-        # time.sleep(1)
+    client.loop_forever()
 
+# image loop
+
+def image_loop_thread(bucket_name, bucket_path, path='/tmp/image.jpg', video=0):
+    envvar = 'GOOGLE_APPLICATION_CREDENTIALS'
+    if not envvar in os.environ: 
+        raise RuntimeError('envvar \'{}\' is not defined'.format(envvar))
+
+    # setup storage client
+
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+
+    # setup camera
+
+    camera = cv2.VideoCapture(video)
+    camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+    while True:
+        # take a snapshot, and save it
+
+        value, image = camera.read()
+        cv2.imwrite(path, image)
+
+        # upload it to gcs
+
+        blob_name = '{}/{}.jpg'.format(
+            bucket_path, 
+            str(datetime.datetime.now(tz))
+        )
+        blob = bucket.blob(blob_name)
+        blob.upload_from_filename(path)
+
+        logger.info('uploaded => gs://{}/{}'.format(bucket_name, blob_name))
+
+    time.sleep(60)
+    
 # main
 
 # specific gateway callbacks
@@ -246,6 +311,14 @@ def callback_command_sensor(client, userdata, message):
 
 # specific devices callbacks
 
+# argparse helpers
+
+def is_valid_file(parser, arg):
+    if not os.path.exists(arg):
+        parser.error('%s'.format(arg))
+    else:
+        return arg
+
 if __name__ == '__main__':
 
     default_loglevel = 'INFO'
@@ -257,12 +330,21 @@ if __name__ == '__main__':
         default=default_loglevel
     )
 
+    parser.add_argument(
+        '--private-key',
+        required=True,
+        dest='private_key_file',
+        help='private key file path',
+        metavar='/absolute/path/private.pem',
+        type=lambda x: is_valid_file(parser, x),
+        default=default_loglevel
+    )
+
     args = parser.parse_args()
 
-    logging.basicConfig(
-        format='%(asctime)-15s : %(message)s', 
-        level=args.loglevel.upper()
-    )
+    # set log level
+
+    logger.setLevel(args.loglevel.upper())
 
     # actual script lifecycle
 
@@ -272,7 +354,7 @@ if __name__ == '__main__':
     cloud_region = 'us-central1'
     registry_id = 'raspberry'
     gateway_id = 'default'
-    private_key_file = 'private.pem'
+    private_key_file = args.private_key_file
 
     logger.info('starting IoT client..')
 
@@ -291,9 +373,11 @@ if __name__ == '__main__':
 
     # run network thread and wait until connect before moving on
 
-    client_loop = threading.Thread(target=client_loop_thread, args=(client,))
+    client_loop = threading.Thread(
+        target=client_loop_thread, 
+        args=(client,)
+    )
     client_loop.start()
-    #client_loop.join()
 
     logger.info('waiting on connection...')
     connection_event.wait(timeout=20)
@@ -376,6 +460,17 @@ if __name__ == '__main__':
             )
 
         logger.info('-'*80)
+
+    # start taking camera pictures
+
+    bucket_name = 'danarchy-io'
+    bucket_path = 'iotcore/images'
+
+    image_loop = threading.Thread(
+        target=image_loop_thread, 
+        args=(bucket_name, bucket_path,)
+    )
+    #image_loop.start()
 
     while True:
         #client.loop()
