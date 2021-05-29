@@ -1,3 +1,11 @@
+"""
+QoS Messaging:
+ - 0  No guarantee (best effort only)
+      even when the request returns OK
+ - 1  At-least-once delivery guaranteed 
+      if the sendCommandtoDevice request returns OK
+"""
+
 #!/usr/bin/env python
 
 # -*- coding: utf-8 -*-
@@ -19,18 +27,23 @@ import pathlib
 
 from collections import OrderedDict
 
-logging.basicConfig(format='%(asctime)-15s : %(message)s')
+logging.basicConfig(
+    format='%(asctime)-15s %(name)s [%(levelname)s] %(threadName)s:%(funcName)s:%(lineno)d : %(message)s'
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 basepath = pathlib.Path(__file__).resolve().absolute().parent
 
+# check imports
+
 try:
     import pytz
     import jwt
     import ssl
     import paho.mqtt.client as mqtt
+    #import Adafruit_DHT as adafruit
     # import cv2
 
     # from google.cloud import storage
@@ -41,22 +54,44 @@ except:
     )
     sys.exit(1)
 
-#
-# QoS Guarantee
-#
-#  0  No guarantee (best effort only)
-#     even when the request returns OK
-#
-#  1  At-least-once delivery guaranteed 
-#     if the sendCommandtoDevice request returns OK
-#
-
-# global variables (possibly modified by some functions)
+# timezone
 
 tz = pytz.timezone('America/Santiago')
 tz = pytz.timezone('UTC')
 
-connection_event = threading.Event()
+# mqtt
+
+connection_project = 'danarchy-io'
+connection_region = 'us-central1'
+connection_registry = 'raspberry'
+connection_gateway = 'default'
+connection_key = None
+connection_devices = None
+
+# connection
+
+connection_client = None
+connection_timeout = 20
+connection_connected = False
+connection_connected_ts = None
+connection_expire = None
+
+# events
+
+connection_event_connected = threading.Event()
+connection_event_disconnected = threading.Event()
+
+# locks
+
+lock_connection = threading.RLock()
+lock_commands = threading.RLock()
+lock_configuration = threading.RLock()
+
+# threads
+
+thread_connection = None
+thread_gateway_state = None
+thread_gateway_state_2 = None
 
 # helper functions
 
@@ -78,6 +113,34 @@ def create_jwt(project_id, private_key_file, algorithm):
 
     return jwt.encode(token, private_key_str, algorithm=algorithm)
 
+
+def safe_thread_publish(topic, payload):
+    with lock_connection:
+        try:
+            if connection_connected:
+                connection_client.publish(topic, payload)
+                logger.info(
+                    'published on topic = {}, payload = {}'.format(
+                        topic, payload
+                    )
+                )
+                return True
+            else:
+                logger.warning(
+                    'connected = {}, error publishing {}, on {}'.format(
+                        connection_connected, topic, payload
+                    )
+                )
+                return False
+        except:
+            logger.exception(
+                'connected = {}, error publishing {}, on {}'.format(
+                    connection_connected, topic, payload
+                )
+            )
+            return False
+
+
 # defaul mqtt callbacks
 
 def error_str(rc):
@@ -85,12 +148,21 @@ def error_str(rc):
 
 
 def callback_connect(client, userdata, unused_flags, rc):
+    global connection_connected
     logger.info('callback_connect => %s', mqtt.connack_string(rc))
-    connection_event.set()
+    with lock_connection:
+        connection_connected = True
+    connection_event_connected.set()
+    connection_event_disconnected.clear()
 
 
 def callback_disconnect(client, userdata, rc):
+    global connection_connected
     logger.info('callback_disconnect => %s', error_str(rc))
+    with lock_connection:
+        connection_connected = False
+    connection_event_connected.clear()
+    connection_event_disconnected.set()
 
 
 def callback_subscribe(client, userdata, mid, granted_qos):
@@ -98,7 +170,7 @@ def callback_subscribe(client, userdata, mid, granted_qos):
 
 
 def callback_publish(client, userdata, unused_mid):
-    logger.debug('callback_publish')
+    logger.info('callback_publish')
 
 
 def callback_message(client, userdata, message):
@@ -209,10 +281,12 @@ def reattach_device(client, device):
     detach_device(client, device)
     attach_device(client, device)
 
-# client loop
+# thread functions
 
-def client_loop_thread(client):
-    client.loop_forever()
+def thread_connection_loop():
+    global connection_client
+    connection_client.loop_forever()
+    logger.info('exiting...')
 
 # image loop
 
@@ -282,6 +356,8 @@ def callback_command_gateway(client, userdata, message):
         str(message.qos)
     )
 
+# specific devices callbacks
+
 def callback_config_sensor(client, userdata, message):
     payload = str(message.payload.decode('utf-8'))
     logger.info(
@@ -309,7 +385,86 @@ def callback_command_sensor(client, userdata, message):
         str(message.qos)
     )
 
-# specific devices callbacks
+# sensor
+
+def sensor_loop_thread(client, topic, GPIO_PIN=4):
+
+    last_h = 0
+    last_t = 0
+
+    limit = 10
+
+    lines = list()
+
+    first_run = True
+
+    while True:
+        try:
+            #h,t = adafruit.read_retry(adafruit.DHT22, GPIO_PIN)
+            h, t = 50, 22
+
+            flag_h = 0
+            flag_t = 0
+
+            if not h:
+                flag_h = 1
+                h = last_h
+
+            if not t:
+                flag_t = 1
+                t = last_t
+
+            if not first_run and abs(h - last_h) >= 5:
+                flag_h = 2
+                h = last_h
+
+            if not first_run and abs(t - last_t) >= 5:
+                flag_t = 2
+                t = last_t
+
+            last_h = h
+            last_t = t
+            first_run = False
+
+            payload = '{},{:.2f},{:.2f},{},{}'.format(
+                str(datetime.datetime.now(tz)),
+                h,
+                t,
+                flag_h,
+                flag_t
+            )
+
+            try:
+                #client.publish(topic, payload)
+                logger.info(
+                    'published, error = {}, payload = {}'.format(
+                        False, payload
+                    )
+                )
+            except:
+                logger.exception(
+                    'published, error = {}, payload = {}'.format(
+                        True, payload
+                    )
+                )
+                logger.error(
+                    'published, error = {}, payload = {}'.format(
+                        True, payload
+                    )
+                )
+
+        except Exception as e:
+            logger.exception('there was an error, check the stacktrace...')
+
+        time.sleep(1)
+
+
+def thread_loop_gateway_state(topic):
+    while True:
+        payload = 'ping {}'.format(str(datetime.datetime.now(tz)))
+        published = safe_thread_publish(topic, payload)        
+        time.sleep(2)
+
 
 # argparse helpers
 
@@ -319,6 +474,130 @@ def is_valid_file(parser, arg):
     else:
         return arg
 
+
+def setup_connection():
+    global connection_client
+    global thread_connection
+
+    logger.info('starting mqtt client...')
+
+    connection_client = build_client(
+        connection_project, 
+        connection_region, 
+        connection_registry, 
+        connection_gateway, 
+        connection_key,
+        callback_connect=callback_connect,
+        callback_disconnect=callback_disconnect,
+        callback_publish=callback_publish,
+        callback_subscribe=callback_subscribe,
+        callback_message=callback_message
+    )
+
+    thread_connection = threading.Thread(
+        name='thread_connection',
+        target=thread_connection_loop, 
+    )
+    thread_connection.start()
+
+    if not connection_event_connected.is_set():
+        logger.info('waiting on connection to complete...')
+        connection_event_connected.wait(timeout=connection_timeout)
+        if not connection_event_connected.is_set():
+            raise RuntimeError('connection timeout')
+
+    connection_connected_ts = datetime.datetime.now(tz)
+    logger.info('starting mqtt client... done')
+
+
+def setup_disconnect():
+    global connection_client
+    global connection_connected
+
+    if connection_client:
+
+        logger.info('disconnecting client...')
+        with lock_connection:
+            
+            logger.info('detaching devices from the gateway...')
+            for device in connection_devices:
+                if device == connection_gateway: continue
+                detach_device(connection_client, device)
+            time.sleep(5)
+
+            connection_connected = False
+            connection_client.disconnect()
+
+        if not connection_event_disconnected.is_set():
+            logger.info('waiting on desconnection to complete...')
+            connection_event_disconnected.wait(timeout=connection_timeout)
+            if not connection_event_disconnected.is_set():
+                logger.error('disconnection timeout')
+
+
+def setup_devices():
+    global connection_devices
+
+    logger.info('starting devices configuration..')
+
+    logging.debug('devices => %s', connection_client)
+
+    logger.info('attaching devices to the gateway...')
+    for device in connection_devices:
+        if device == connection_gateway: continue
+        attach_device(connection_client, device)
+    time.sleep(5)
+
+    logger.info('subscribing devices to its topics...')
+
+    logger.info('-'*80)
+
+    for device, subtopics in connection_devices.items():
+        logger.info('device \'%s\' => configuration', device)
+
+        for subtopic, configuration in subtopics.items():
+            qos = configuration['qos']
+            callback = configuration['callback']
+
+            topic = '/devices/{}/{}'.format(device, subtopic)
+
+            connection_client.message_callback_add(topic, callback)
+            logger.info(
+                'device \'%s\' => callback %s set to %s', 
+                device, topic, callback
+            )
+
+            _, mid = connection_client.subscribe(topic, qos=qos)
+            logger.info(
+                'device \'%s\' => subscribe to %s QoS set to %s, with mid %s', 
+                device, topic, qos, mid
+            )
+
+        logger.info('-'*80)
+
+
+def setup_threads():
+    global thread_gateway_state
+
+    # gateway state
+
+    if not thread_gateway_state:
+        thread_gateway_state = threading.Thread(
+            name='thread_gateway_state',
+            target=thread_loop_gateway_state, 
+            args=('/devices/{}/{}'.format(connection_gateway, 'state'),)
+        )
+        thread_gateway_state.start()
+
+    if not thread_gateway_state_2:
+        thread_gateway_state = threading.Thread(
+            name='thread_gateway_state_2',
+            target=thread_loop_gateway_state, 
+            args=('/devices/{}/{}'.format('sensor', 'state'),)
+        )
+        thread_gateway_state.start()
+
+
 if __name__ == '__main__':
 
     default_loglevel = 'INFO'
@@ -327,68 +606,34 @@ if __name__ == '__main__':
 
     parser.add_argument(
         '--loglevel',
+        metavar='INFO',
         default=default_loglevel
     )
 
     parser.add_argument(
         '--private-key',
         required=True,
-        dest='private_key_file',
+        dest='key',
         help='private key file path',
         metavar='/absolute/path/private.pem',
         type=lambda x: is_valid_file(parser, x),
         default=default_loglevel
     )
 
+    parser.add_argument(
+        '--expire',
+        help='minutes for the jwt to expire, triggers a reconnection',
+        metavar='20',
+        type=int,
+        default=60
+    )
+
     args = parser.parse_args()
 
-    # set log level
+    logger.info('args => {}'.format(args))
 
-    logger.setLevel(args.loglevel.upper())
-
-    # actual script lifecycle
-
-    # build client
-
-    project_id = 'danarchy-io'
-    cloud_region = 'us-central1'
-    registry_id = 'raspberry'
-    gateway_id = 'default'
-    private_key_file = args.private_key_file
-
-    logger.info('starting IoT client..')
-
-    client = build_client(
-        project_id, 
-        cloud_region, 
-        registry_id, 
-        gateway_id, 
-        private_key_file,
-        callback_connect=callback_connect,
-        callback_disconnect=callback_disconnect,
-        callback_publish=callback_publish,
-        callback_subscribe=callback_subscribe,
-        callback_message=callback_message
-    )
-
-    # run network thread and wait until connect before moving on
-
-    client_loop = threading.Thread(
-        target=client_loop_thread, 
-        args=(client,)
-    )
-    client_loop.start()
-
-    logger.info('waiting on connection...')
-    connection_event.wait(timeout=20)
-    if not connection_event.is_set():
-        raise RuntimeError('connection timeout') 
-
-    # devices configuration (including gateway)
-
-    devices = OrderedDict({
-
-        gateway_id : {
+    connection_devices = OrderedDict({
+        connection_gateway : {
             'config' : {
                 'qos' : 1,
                 'callback' : callback_config_gateway
@@ -402,7 +647,6 @@ if __name__ == '__main__':
                 'callback' : callback_command_gateway
             },
         },
-
         'sensor' : {
             'config' : {
                 'qos' : 1,
@@ -417,61 +661,41 @@ if __name__ == '__main__':
                 'callback' : callback_command_sensor
             },
         },
-
     })
 
-    logging.debug('devices => %s', devices)
+    logger.setLevel(args.loglevel.upper())
 
-    # attach all devices but the gateway
+    connection_key = args.key
+    connection_expire = args.expire
 
-    logger.info('attaching devices to the gateway...')
+    # # start taking camera pictures
 
-    for device in devices:
-        if device == gateway_id: continue
-        attach_device(client, device)
+    # bucket_name = 'danarchy-io'
+    # bucket_path = 'iotcore/images'
 
-    time.sleep(3)
+    # image_loop = threading.Thread(
+    #     name='thread-image',
+    #     target=image_loop_thread, 
+    #     args=(bucket_name, bucket_path,)
+    # )
+    # #image_loop.start()
 
-    # subscribe all devices to its topics
+    # # start publishing sensor values
 
-    logger.info('starting device configuration..')
+    # sensor_loop = threading.Thread(
+    #     name='thread-sensor',
+    #     target=sensor_loop_thread, 
+    #     args=(client, '/devices/{}/{}'.format('sensor', 'events'))
+    # )
+    # sensor_loop.start()
 
-    logger.info('-'*80)
-
-    for device, subtopics in devices.items():
-        logger.info('device \'%s\' => configuration', device)
-
-        for subtopic, configuration in subtopics.items():
-            qos = configuration['qos']
-            callback = configuration['callback']
-
-            topic = '/devices/{}/{}'.format(device, subtopic)
-
-            client.message_callback_add(topic, callback)
-            logger.info(
-                'device \'%s\' => callback %s set to %s', 
-                device, topic, callback
-            )
-
-            _, mid = client.subscribe(topic, qos=qos)
-            logger.info(
-                'device \'%s\' => subscribe to %s QoS set to %s, with mid %s', 
-                device, topic, qos, mid
-            )
-
-        logger.info('-'*80)
-
-    # start taking camera pictures
-
-    bucket_name = 'danarchy-io'
-    bucket_path = 'iotcore/images'
-
-    image_loop = threading.Thread(
-        target=image_loop_thread, 
-        args=(bucket_name, bucket_path,)
-    )
-    #image_loop.start()
-
+    # sensor_loop.join()
+    
     while True:
-        #client.loop()
-        time.sleep(1)
+        setup_disconnect()
+        #logger.info('-')
+        print('\n'*3)
+        setup_connection()
+        setup_devices()
+        setup_threads()
+        time.sleep(connection_expire)
