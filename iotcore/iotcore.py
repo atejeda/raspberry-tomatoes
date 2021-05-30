@@ -532,9 +532,7 @@ if __name__ == '__main__':
     connection_key = args.key
     connection_expire = args.expire
 
-
-    setup_connect()
-    time.sleep(connection_expire)
-    setup_disconnect()
-    time.sleep(5)
-    setup_connect()
+    while True:
+        setup_connect()
+        time.sleep(connection_expire)
+        setup_disconnect()
