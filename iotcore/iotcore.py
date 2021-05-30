@@ -67,6 +67,7 @@ connection_registry = 'raspberry'
 connection_gateway = 'default'
 connection_key = None
 connection_devices = None
+connection_devices_mid = None
 
 # connection
 
@@ -91,7 +92,6 @@ lock_configuration = threading.RLock()
 
 thread_connection = None
 thread_gateway_state = None
-thread_gateway_state_2 = None
 
 # helper functions
 
@@ -113,65 +113,78 @@ def create_jwt(project_id, private_key_file, algorithm):
 
     return jwt.encode(token, private_key_str, algorithm=algorithm)
 
+def is_valid_file(parser, arg):
+    if not os.path.exists(arg):
+        parser.error('%s'.format(arg))
+    else:
+        return arg
 
-def safe_thread_publish(topic, payload):
+def safe_thread_publish(topic, payload, qos=0):
     with lock_connection:
         try:
             if connection_connected:
-                connection_client.publish(topic, payload)
+                _, mid = connection_client.publish(topic, payload, qos=qos)
                 logger.info(
-                    'published on topic = {}, payload = {}'.format(
-                        topic, payload
+                    'published on {}, mid {}, payload = {}'.format(
+                        topic, mid, payload
                     )
                 )
-                return True
+                return True, mid
             else:
                 logger.warning(
-                    'connected = {}, error publishing {}, on {}'.format(
+                    'connected = {}, error publishing on {}, payload = {}'.format(
                         connection_connected, topic, payload
                     )
                 )
-                return False
+                return False, -1
         except:
             logger.exception(
-                'connected = {}, error publishing {}, on {}'.format(
+                'connected = {}, error publishing on {}, payload = {}'.format(
                     connection_connected, topic, payload
                 )
             )
-            return False
-
+            return False, -1
 
 # defaul mqtt callbacks
 
 def error_str(rc):
     return '{}: {}'.format(rc, mqtt.error_string(rc))
 
-
 def callback_connect(client, userdata, unused_flags, rc):
     global connection_connected
-    logger.info('callback_connect => %s', mqtt.connack_string(rc))
-    with lock_connection:
-        connection_connected = True
-    connection_event_connected.set()
-    connection_event_disconnected.clear()
+    global connection_connected_ts
 
+    logger.info('callback_connect => %s', mqtt.connack_string(rc))
+
+    with lock_connection:
+        connection_connected_ts = datetime.datetime.now(tz)
+        connection_connected = True
+        setup_devices()
+        setup_threads()
 
 def callback_disconnect(client, userdata, rc):
-    global connection_connected
     logger.info('callback_disconnect => %s', error_str(rc))
-    with lock_connection:
-        connection_connected = False
-    connection_event_connected.clear()
-    connection_event_disconnected.set()
 
 
 def callback_subscribe(client, userdata, mid, granted_qos):
     logger.debug('callback_subscribe => mid {}, qos {}'.format(mid, granted_qos))
 
+def callback_publish(client, userdata, mid):
+    global thread_loop_gateway_state_mid
 
-def callback_publish(client, userdata, unused_mid):
-    logger.info('callback_publish')
+    # attach?
 
+    if connection_devices_mid and mid in connection_devices_mid:
+        device = connection_devices_mid[mid]
+        connection_devices_mid.pop(mid)
+        logger.info(
+            'device \'%s\' server side attached with mid %s', 
+            device, mid
+        )
+        for subtopic, configuration in connection_devices[device].items():
+            qos = configuration['qos']
+            callback = configuration['callback']
+            setup_subscribe(connection_client, device, qos, subtopic, callback)
 
 def callback_message(client, userdata, message):
     payload = str(message.payload.decode('utf-8'))
@@ -262,72 +275,20 @@ def build_client(
 
     return client
 
-# device attach
-
-def attach_device(client, device, auth=''):
-    topic = "/devices/{}/attach".format(device)
-    logger.info('attaching => %s to %s', device, topic) 
-    _, mid = client.publish(topic, '{{"authorization" : "{}"}}'.format(auth), qos=1)
-
-
-def detach_device(client, device):
-    topic = "/devices/{}/detach".format(device)
-    logger.info('detaching => %s from %s', device, topic)
-    _, mid = client.publish(topic, "{}", qos=1)
-
-
-def reattach_device(client, device):
-    logger.info('reattach => %s', device)
-    detach_device(client, device)
-    attach_device(client, device)
-
 # thread functions
 
 def thread_connection_loop():
-    global connection_client
     connection_client.loop_forever()
     logger.info('exiting...')
 
-# image loop
-
-def image_loop_thread(bucket_name, bucket_path, path='/tmp/image.jpg', video=0):
-    envvar = 'GOOGLE_APPLICATION_CREDENTIALS'
-    if not envvar in os.environ: 
-        raise RuntimeError('envvar \'{}\' is not defined'.format(envvar))
-
-    # setup storage client
-
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
-
-    # setup camera
-
-    camera = cv2.VideoCapture(video)
-    camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
+def thread_loop_gateway_state(topic):
     while True:
-        # take a snapshot, and save it
+        payload = 'ping {}'.format(str(datetime.datetime.now(tz)))
+        success, mid = safe_thread_publish(topic, payload, 0)
+        time.sleep(2)
 
-        value, image = camera.read()
-        cv2.imwrite(path, image)
 
-        # upload it to gcs
-
-        blob_name = '{}/{}.jpg'.format(
-            bucket_path, 
-            str(datetime.datetime.now(tz))
-        )
-        blob = bucket.blob(blob_name)
-        blob.upload_from_filename(path)
-
-        logger.info('uploaded => gs://{}/{}'.format(bucket_name, blob_name))
-
-    time.sleep(60)
-    
-# main
-
-# specific gateway callbacks
+# callbacks: gateway
 
 def callback_config_gateway(client, userdata, message):
     payload = str(message.payload.decode('utf-8'))
@@ -356,7 +317,7 @@ def callback_command_gateway(client, userdata, message):
         str(message.qos)
     )
 
-# specific devices callbacks
+# callbacks: sensor
 
 def callback_config_sensor(client, userdata, message):
     payload = str(message.payload.decode('utf-8'))
@@ -385,95 +346,7 @@ def callback_command_sensor(client, userdata, message):
         str(message.qos)
     )
 
-# sensor
-
-def sensor_loop_thread(client, topic, GPIO_PIN=4):
-
-    last_h = 0
-    last_t = 0
-
-    limit = 10
-
-    lines = list()
-
-    first_run = True
-
-    while True:
-        try:
-            #h,t = adafruit.read_retry(adafruit.DHT22, GPIO_PIN)
-            h, t = 50, 22
-
-            flag_h = 0
-            flag_t = 0
-
-            if not h:
-                flag_h = 1
-                h = last_h
-
-            if not t:
-                flag_t = 1
-                t = last_t
-
-            if not first_run and abs(h - last_h) >= 5:
-                flag_h = 2
-                h = last_h
-
-            if not first_run and abs(t - last_t) >= 5:
-                flag_t = 2
-                t = last_t
-
-            last_h = h
-            last_t = t
-            first_run = False
-
-            payload = '{},{:.2f},{:.2f},{},{}'.format(
-                str(datetime.datetime.now(tz)),
-                h,
-                t,
-                flag_h,
-                flag_t
-            )
-
-            try:
-                #client.publish(topic, payload)
-                logger.info(
-                    'published, error = {}, payload = {}'.format(
-                        False, payload
-                    )
-                )
-            except:
-                logger.exception(
-                    'published, error = {}, payload = {}'.format(
-                        True, payload
-                    )
-                )
-                logger.error(
-                    'published, error = {}, payload = {}'.format(
-                        True, payload
-                    )
-                )
-
-        except Exception as e:
-            logger.exception('there was an error, check the stacktrace...')
-
-        time.sleep(1)
-
-
-def thread_loop_gateway_state(topic):
-    while True:
-        payload = 'ping {}'.format(str(datetime.datetime.now(tz)))
-        published = safe_thread_publish(topic, payload)        
-        time.sleep(2)
-
-
-# argparse helpers
-
-def is_valid_file(parser, arg):
-    if not os.path.exists(arg):
-        parser.error('%s'.format(arg))
-    else:
-        return arg
-
+# setups
 
 def setup_connection():
     global connection_client
@@ -500,16 +373,6 @@ def setup_connection():
     )
     thread_connection.start()
 
-    if not connection_event_connected.is_set():
-        logger.info('waiting on connection to complete...')
-        connection_event_connected.wait(timeout=connection_timeout)
-        if not connection_event_connected.is_set():
-            raise RuntimeError('connection timeout')
-
-    connection_connected_ts = datetime.datetime.now(tz)
-    logger.info('starting mqtt client... done')
-
-
 def setup_disconnect():
     global connection_client
     global connection_connected
@@ -521,7 +384,8 @@ def setup_disconnect():
             
             logger.info('detaching devices from the gateway...')
             for device in connection_devices:
-                if device == connection_gateway: continue
+                if device == connection_gateway: 
+                    continue
                 detach_device(connection_client, device)
             time.sleep(5)
 
@@ -534,47 +398,36 @@ def setup_disconnect():
             if not connection_event_disconnected.is_set():
                 logger.error('disconnection timeout')
 
-
 def setup_devices():
     global connection_devices
+    global connection_devices_mid
 
     logger.info('starting devices configuration..')
 
     logging.debug('devices => %s', connection_client)
 
+    connection_devices_mid = dict()
     logger.info('attaching devices to the gateway...')
     for device in connection_devices:
-        if device == connection_gateway: continue
-        attach_device(connection_client, device)
-    time.sleep(5)
+        if device == connection_gateway: 
+            continue
+        mid = setup_attach(connection_client, device)
+        connection_devices_mid[mid] = device
+    
+def setup_subscribe(client, device, qos, subtopic, callback):
+        topic = '/devices/{}/{}'.format(device, subtopic)
 
-    logger.info('subscribing devices to its topics...')
+        client.message_callback_add(topic, callback)
+        logger.info(
+            'device \'%s\' => callback %s set to %s', 
+            device, topic, callback
+        )
 
-    logger.info('-'*80)
-
-    for device, subtopics in connection_devices.items():
-        logger.info('device \'%s\' => configuration', device)
-
-        for subtopic, configuration in subtopics.items():
-            qos = configuration['qos']
-            callback = configuration['callback']
-
-            topic = '/devices/{}/{}'.format(device, subtopic)
-
-            connection_client.message_callback_add(topic, callback)
-            logger.info(
-                'device \'%s\' => callback %s set to %s', 
-                device, topic, callback
-            )
-
-            _, mid = connection_client.subscribe(topic, qos=qos)
-            logger.info(
-                'device \'%s\' => subscribe to %s QoS set to %s, with mid %s', 
-                device, topic, qos, mid
-            )
-
-        logger.info('-'*80)
-
+        _, mid = client.subscribe(topic, qos=qos)
+        logger.info(
+            'device \'%s\' => subscribe to %s QoS set to %s, with mid %s', 
+            device, topic, qos, mid
+        )
 
 def setup_threads():
     global thread_gateway_state
@@ -589,14 +442,15 @@ def setup_threads():
         )
         thread_gateway_state.start()
 
-    if not thread_gateway_state_2:
-        thread_gateway_state = threading.Thread(
-            name='thread_gateway_state_2',
-            target=thread_loop_gateway_state, 
-            args=('/devices/{}/{}'.format('sensor', 'state'),)
-        )
-        thread_gateway_state.start()
+def setup_attach(client, device, auth=''):
+    topic = "/devices/{}/attach".format(device)
+    _, mid = client.publish(topic, '{{"authorization" : "{}"}}'.format(auth), qos=1)
+    logger.info('attaching => %s to %s with mid %s', device, topic, mid)
+    return mid
 
+
+
+# main
 
 if __name__ == '__main__':
 
@@ -668,34 +522,4 @@ if __name__ == '__main__':
     connection_key = args.key
     connection_expire = args.expire
 
-    # # start taking camera pictures
-
-    # bucket_name = 'danarchy-io'
-    # bucket_path = 'iotcore/images'
-
-    # image_loop = threading.Thread(
-    #     name='thread-image',
-    #     target=image_loop_thread, 
-    #     args=(bucket_name, bucket_path,)
-    # )
-    # #image_loop.start()
-
-    # # start publishing sensor values
-
-    # sensor_loop = threading.Thread(
-    #     name='thread-sensor',
-    #     target=sensor_loop_thread, 
-    #     args=(client, '/devices/{}/{}'.format('sensor', 'events'))
-    # )
-    # sensor_loop.start()
-
-    # sensor_loop.join()
-    
-    while True:
-        setup_disconnect()
-        #logger.info('-')
-        print('\n'*3)
-        setup_connection()
-        setup_devices()
-        setup_threads()
-        time.sleep(connection_expire)
+    setup_connection()
