@@ -94,6 +94,8 @@ lock_attach = threading.RLock()
 
 thread_connection = None
 thread_gateway_state = None
+thread_sensor_events = None
+thread_image_events = None
 
 # dicts
 
@@ -271,7 +273,7 @@ def build_client(
 
 # thread functions
 
-def thread_connection_loop():
+def thread_loop_connection():
     connection_client.loop_forever()
     logger.info('exiting...')
 
@@ -279,7 +281,64 @@ def thread_loop_gateway_state(topic):
     while True:
         payload = 'ping {}'.format(str(datetime.datetime.now(tz)))
         success, mid = publish(topic, payload, 0)
-        time.sleep(2)
+        time.sleep(300)
+
+def thread_loop_sensor(topic):
+    last_h = 0
+    last_t = 0
+
+    limit = 10
+
+    lines = list()
+
+    first_run = True
+
+    while True:
+        try:
+            #h,t = adafruit.read_retry(adafruit.DHT22, GPIO_PIN)
+            h, t = 50, 22
+
+            flag_h = 0
+            flag_t = 0
+
+            if not h:
+                flag_h = 1
+                h = last_h
+
+            if not t:
+                flag_t = 1
+                t = last_t
+
+            if not first_run and abs(h - last_h) >= 5:
+                flag_h = 2
+                h = last_h
+
+            if not first_run and abs(t - last_t) >= 5:
+                flag_t = 2
+                t = last_t
+
+            last_h = h
+            last_t = t
+            first_run = False
+
+            payload = '{},{:.2f},{:.2f},{},{}'.format(
+                str(datetime.datetime.now(tz)),
+                h,
+                t,
+                flag_h,
+                flag_t
+            )
+
+            success, mid = publish(topic, payload)
+
+        except Exception as e:
+            logger.exception('there was an error, check the stacktrace...')
+
+        time.sleep(1)
+
+def thread_loop_image():
+    while True:
+        time.sleep(1)
 
 # callbacks: gateway
 
@@ -362,7 +421,7 @@ def setup_connect():
 
     thread_connection = threading.Thread(
         name='thread_connection',
-        target=thread_connection_loop, 
+        target=thread_loop_connection, 
     )
     thread_connection.start()
 
@@ -390,7 +449,6 @@ def setup_disconnect():
             connection_event_disconnected.wait(timeout=connection_timeout)
             if not connection_event_disconnected.is_set():
                 logger.error('disconnection timeout')
-
 
 def setup_devices():
     global connection_devices
@@ -437,16 +495,38 @@ def setup_subscribe(client, device, qos, subtopic, callback):
 
 def setup_threads():
     global thread_gateway_state
+    global thread_sensor_events
+    global thread_image_events
 
     # gateway state
 
     if not thread_gateway_state:
         thread_gateway_state = threading.Thread(
             name='thread_gateway_state',
-            target=thread_loop_gateway_state, 
+            target=thread_gateway_state, 
             args=('/devices/{}/{}'.format(connection_gateway, 'state'),)
         )
         thread_gateway_state.start()
+
+    # sensor
+
+    if not thread_sensor_events:
+        thread_sensor_events = threading.Thread(
+            name='thread_sensor_events',
+            target=thread_loop_sensor, 
+            args=('/devices/{}/{}'.format(connection_gateway, 'events'),)
+        )
+        thread_sensor_events.start()
+
+    # images
+
+    if not thread_image_events:
+        thread_image_events = threading.Thread(
+            name='thread_image_events',
+            target=thread_loop_image,
+        )
+        thread_image_events.start()
+
 
 def setup_attach(client, device, auth=''):
     topic = "/devices/{}/attach".format(device)
