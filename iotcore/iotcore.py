@@ -67,7 +67,8 @@ connection_registry = 'raspberry'
 connection_gateway = 'default'
 connection_key = None
 connection_devices = None
-connection_devices_mid = None
+connection_publish_mid = None
+
 
 # connection
 
@@ -87,11 +88,16 @@ connection_event_disconnected = threading.Event()
 lock_connection = threading.RLock()
 lock_commands = threading.RLock()
 lock_configuration = threading.RLock()
+lock_attach = threading.RLock()
 
 # threads
 
 thread_connection = None
 thread_gateway_state = None
+
+# dicts
+
+connection_publish_mid = None
 
 # helper functions
 
@@ -119,7 +125,7 @@ def is_valid_file(parser, arg):
     else:
         return arg
 
-def safe_thread_publish(topic, payload, qos=0):
+def publish(topic, payload, qos=0):
     with lock_connection:
         try:
             if connection_connected:
@@ -157,6 +163,7 @@ def callback_connect(client, userdata, unused_flags, rc):
     logger.info('callback_connect => %s', mqtt.connack_string(rc))
 
     with lock_connection:
+        connection_event_disconnected.clear()
         connection_connected_ts = datetime.datetime.now(tz)
         connection_connected = True
         setup_devices()
@@ -164,27 +171,14 @@ def callback_connect(client, userdata, unused_flags, rc):
 
 def callback_disconnect(client, userdata, rc):
     logger.info('callback_disconnect => %s', error_str(rc))
-
+    with lock_connection:
+        connection_event_disconnected.set()
 
 def callback_subscribe(client, userdata, mid, granted_qos):
     logger.debug('callback_subscribe => mid {}, qos {}'.format(mid, granted_qos))
 
 def callback_publish(client, userdata, mid):
-    global thread_loop_gateway_state_mid
-
-    # attach?
-
-    if connection_devices_mid and mid in connection_devices_mid:
-        device = connection_devices_mid[mid]
-        connection_devices_mid.pop(mid)
-        logger.info(
-            'device \'%s\' server side attached with mid %s', 
-            device, mid
-        )
-        for subtopic, configuration in connection_devices[device].items():
-            qos = configuration['qos']
-            callback = configuration['callback']
-            setup_subscribe(connection_client, device, qos, subtopic, callback)
+    pass
 
 def callback_message(client, userdata, message):
     payload = str(message.payload.decode('utf-8'))
@@ -284,9 +278,8 @@ def thread_connection_loop():
 def thread_loop_gateway_state(topic):
     while True:
         payload = 'ping {}'.format(str(datetime.datetime.now(tz)))
-        success, mid = safe_thread_publish(topic, payload, 0)
+        success, mid = publish(topic, payload, 0)
         time.sleep(2)
-
 
 # callbacks: gateway
 
@@ -348,7 +341,7 @@ def callback_command_sensor(client, userdata, message):
 
 # setups
 
-def setup_connection():
+def setup_connect():
     global connection_client
     global thread_connection
 
@@ -377,16 +370,16 @@ def setup_disconnect():
     global connection_client
     global connection_connected
 
-    if connection_client:
-
-        logger.info('disconnecting client...')
-        with lock_connection:
-            
+    with lock_connection:
+        if connection_client and connection_connected:
             logger.info('detaching devices from the gateway...')
-            for device in connection_devices:
-                if device == connection_gateway: 
-                    continue
-                detach_device(connection_client, device)
+            devices = {
+                k:v for k,v in connection_devices.items() if k != connection_gateway 
+            }
+
+            for device in devices:
+                mid = setup_detach(connection_client, device)
+            
             time.sleep(5)
 
             connection_connected = False
@@ -398,22 +391,35 @@ def setup_disconnect():
             if not connection_event_disconnected.is_set():
                 logger.error('disconnection timeout')
 
+
 def setup_devices():
     global connection_devices
-    global connection_devices_mid
+    global connection_publish_mid
+    global barrier_connection_devices
 
     logger.info('starting devices configuration..')
 
-    logging.debug('devices => %s', connection_client)
-
-    connection_devices_mid = dict()
     logger.info('attaching devices to the gateway...')
-    for device in connection_devices:
-        if device == connection_gateway: 
-            continue
-        mid = setup_attach(connection_client, device)
-        connection_devices_mid[mid] = device
+    devices = {
+         k:v for k,v in connection_devices.items() if k != connection_gateway 
+    }
+
+    logging.debug('devices => %s', connection_client)
     
+    # connection_publish_mid = dict()
+    # barrier = threading.Barrier(len(devices) + 1, timeout=10)
+
+    for device in devices:
+        mid = setup_attach(connection_client, device)
+    
+    time.sleep(5)
+    
+    for device, subtopics in devices.items():
+        for subtopic, configuration in subtopics.items():
+            qos = configuration['qos']
+            callback = configuration['callback']
+            setup_subscribe(connection_client, device, qos, subtopic, callback)
+
 def setup_subscribe(client, device, qos, subtopic, callback):
         topic = '/devices/{}/{}'.format(device, subtopic)
 
@@ -448,7 +454,11 @@ def setup_attach(client, device, auth=''):
     logger.info('attaching => %s to %s with mid %s', device, topic, mid)
     return mid
 
-
+def setup_detach(client, device):
+    topic = "/devices/{}/detach".format(device)
+    _, mid = client.publish(topic, '{}', qos=1)
+    logger.info('detaching => %s to %s with mid %s', device, topic, mid)
+    return mid
 
 # main
 
@@ -522,4 +532,9 @@ if __name__ == '__main__':
     connection_key = args.key
     connection_expire = args.expire
 
-    setup_connection()
+
+    setup_connect()
+    time.sleep(connection_expire)
+    setup_disconnect()
+    time.sleep(5)
+    setup_connect()
