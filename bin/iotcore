@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+BASEPATH="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." &> /dev/null && pwd )"
+
+# enable virtual environment
+
+deactivate > /dev/null 2>&1 | true
+source /opt/virtualenv/iotcore/bin/activate
+
+# execute the script
+
+python $BASEPATH/iotcore/iotcore.py $*
