@@ -106,10 +106,13 @@ connection_publish_mid = None
 
 # helper functions
 
-def create_jwt(project_id, private_key_file, algorithm):
+def create_jwt(project_id, private_key_file, private_key_expire, algorithm):
+    iat = datetime.datetime.utcnow()
+    exp = iat + datetime.timedelta(seconds=private_key_expire + 120)
+    
     token = {
-        "iat": datetime.datetime.utcnow(),
-        "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=20),
+        "iat": iat,
+        "exp": exp, 
         "aud": project_id,
     }
 
@@ -202,6 +205,7 @@ def build_client(
     registry_id,
     device_id,
     private_key_file,
+    private_key_expire,
     algorithm='RS256',
     ca_certs_url='https://pki.google.com/roots.pem',
     mqtt_bridge_hostname='mqtt.googleapis.com',
@@ -243,7 +247,12 @@ def build_client(
     # build jwt auth from private key (private.pem)
 
     username = 'unused'
-    password = create_jwt(project_id, private_key_file, algorithm)
+    password = create_jwt(
+        project_id, 
+        private_key_file, 
+        private_key_expire, 
+        algorithm
+    )
     client.username_pw_set(username=username, password=password)
 
     # download ca_cert
@@ -445,6 +454,7 @@ def setup_connect():
         connection_registry, 
         connection_gateway, 
         connection_key,
+        connection_expire,
         callback_connect=callback_connect,
         callback_disconnect=callback_disconnect,
         callback_publish=callback_publish,
@@ -547,7 +557,7 @@ def setup_threads():
         thread_sensor_events = threading.Thread(
             name='thread_sensor_events',
             target=thread_loop_sensor, 
-            args=('/devices/{}/{}'.format(connection_gateway, 'events'),)
+            args=('/devices/{}/{}'.format('sensor', 'events'),)
         )
         thread_sensor_events.start()
 
