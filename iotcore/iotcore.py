@@ -100,10 +100,6 @@ thread_image_events = None
 
 connection_publish_mid = None
 
-# images
-
-
-
 # helper functions
 
 def create_jwt(project_id, private_key_file, private_key_expire, algorithm):
