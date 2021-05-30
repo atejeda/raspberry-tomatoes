@@ -43,10 +43,10 @@ try:
     import jwt
     import ssl
     import paho.mqtt.client as mqtt
-    #import Adafruit_DHT as adafruit
-    # import cv2
+    import Adafruit_DHT as adafruit
+    import cv2
 
-    # from google.cloud import storage
+    from google.cloud import storage
 except:
     logging.exception(
         'missing requirements, install %s', 
@@ -68,7 +68,6 @@ connection_gateway = 'default'
 connection_key = None
 connection_devices = None
 connection_publish_mid = None
-
 
 # connection
 
@@ -100,6 +99,10 @@ thread_image_events = None
 # dicts
 
 connection_publish_mid = None
+
+# images
+
+
 
 # helper functions
 
@@ -284,6 +287,8 @@ def thread_loop_gateway_state(topic):
         time.sleep(300)
 
 def thread_loop_sensor(topic):
+    gpio_pin = 4
+
     last_h = 0
     last_t = 0
 
@@ -295,8 +300,7 @@ def thread_loop_sensor(topic):
 
     while True:
         try:
-            #h,t = adafruit.read_retry(adafruit.DHT22, GPIO_PIN)
-            h, t = 50, 22
+            h,t = adafruit.read_retry(adafruit.DHT22, gpio_pin)
 
             flag_h = 0
             flag_t = 0
@@ -337,8 +341,37 @@ def thread_loop_sensor(topic):
         time.sleep(1)
 
 def thread_loop_image():
+    bucket_name = 'danarchy-io'
+    bucket_path = 'iotcore/images'
+
+    # setup camera
+
+    camera = cv2.VideoCapture(0)
+    camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+    # setup storage client
+
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+
+    image_path = '/tmp/image.jpg'
+
     while True:
-        time.sleep(1)
+        # take a snapshot, and save it
+
+        value, image = camera.read()
+        cv2.imwrite(image_path, image)
+
+        # upload it to gcs
+        
+        blob_name = '{}/{}.jpg'.format(bucket_path, str(datetime.datetime.now(tz)))
+        blob = bucket.blob(blob_name)
+        blob.upload_from_filename(image_path)
+
+        logger.info('uploaded => gs://{}/{}'.format(bucket_name, blob_name))
+
+        time.sleep(60)
 
 # callbacks: gateway
 
