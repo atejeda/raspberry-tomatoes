@@ -307,6 +307,8 @@ def thread_loop_sensor(topic):
         try:
             h,t = adafruit.read_retry(adafruit.DHT22, gpio_pin)
 
+            print(h,t)
+
             flag_h = 0
             flag_t = 0
 
@@ -320,11 +322,9 @@ def thread_loop_sensor(topic):
 
             if not first_run and abs(h - last_h) >= 5:
                 flag_h = 2
-                h = last_h
 
             if not first_run and abs(t - last_t) >= 5:
                 flag_t = 2
-                t = last_t
 
             last_h = h
             last_t = t
