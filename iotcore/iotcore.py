@@ -25,6 +25,7 @@ import requests
 import tempfile
 import pathlib
 import uuid
+import json
 
 from collections import OrderedDict
 from multiprocessing import Process
@@ -47,8 +48,6 @@ try:
     import jwt
     import ssl
     import paho.mqtt.client as mqtt
-    import Adafruit_DHT as adafruit
-    import cv2
 
     from google.cloud import storage
 except:
@@ -108,7 +107,7 @@ connection_publish_mid = None
 # client
 
 client_host = 'localhost'
-client_port = 6000
+client_port = 7777
 client_passwd = uuid.uuid4().hex
 
 # helper functions
@@ -303,12 +302,12 @@ def thread_loop_gateway_state(topic):
         time.sleep(300)
 
 def thread_loop_sensor_publish(topic):
+    import Adafruit_DHT as adafruit
+
     conn = Client(
-        (client_host, client_post), 
+        (client_host, client_port), 
         authkey=client_passwd.encode()
     )
-    
-    gpio_pin = 4
 
     last_h = 0
     last_t = 0
@@ -321,16 +320,16 @@ def thread_loop_sensor_publish(topic):
 
     while True:
         try:
-            h,t = adafruit.read_retry(adafruit.DHT22, gpio_pin)
+            h,t = adafruit.read_retry(adafruit.DHT22, 4)
 
             flag_h = 0
             flag_t = 0
 
-            if not h:
+            if h is None:
                 flag_h = 1
                 h = last_h
 
-            if not t:
+            if t is None:
                 flag_t = 1
                 t = last_t
 
@@ -362,26 +361,35 @@ def thread_loop_sensor_publish(topic):
         except Exception as e:
             logger.exception('there was an error, check the stacktrace...')
 
-        time.sleep(1)
+        time.sleep(5)
     
     conn.send('close connection')
     conn.close()
 
-def thread_loop_sensor_listener(topic):
+def thread_loop_sensor_listener():
     listener = Listener(
-        (client_host, client_post), 
+        (client_host, client_port), 
         authkey=client_passwd.encode()
     )
 
     running = True
     while running:
         conn = listener.accept()
-        print('connection accepted from', listener.last_accepted)
+        logger.info('connection accepted from %s', listener.last_accepted)
+        
         while True:
             data = json.loads(conn.recv())
-            logger.info(data)
+            logger.debug(data)
+            
+            topic = data['topic']
+            payload = data['payload']
+
+            succes, mid = publish(topic, payload)
+            
 
 def thread_loop_image():
+    import cv2
+
     bucket_name = 'danarchy-io'
     bucket_path = 'iotcore/images'
 
@@ -586,11 +594,10 @@ def setup_threads():
 
     # sensor listener
 
-    if not thread_sensor_listener
+    if not thread_sensor_listener:
         thread_sensor_listener = threading.Thread(
             name='thread_loop_sensor_listener',
             target=thread_loop_sensor_listener, 
-            args=('/devices/{}/{}'.format('sensor', 'events'),)
         )
         thread_sensor_listener.start()
     
