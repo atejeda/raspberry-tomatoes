@@ -24,8 +24,12 @@ import threading
 import requests
 import tempfile
 import pathlib
+import uuid
 
 from collections import OrderedDict
+from multiprocessing import Process
+from multiprocessing.connection import Listener
+from multiprocessing.connection import Client
 
 logging.basicConfig(
     format='%(asctime)-15s %(name)s [%(levelname)s] %(threadName)s:%(funcName)s:%(lineno)d : %(message)s'
@@ -93,12 +97,19 @@ lock_attach = threading.RLock()
 
 thread_connection = None
 thread_gateway_state = None
-thread_sensor_events = None
+thread_sensor_publish = None
+thread_sensor_listener = None
 thread_image_events = None
 
 # dicts
 
 connection_publish_mid = None
+
+# client
+
+client_host = 'localhost'
+client_port = 6000
+client_passwd = uuid.uuid4().hex
 
 # helper functions
 
@@ -291,7 +302,12 @@ def thread_loop_gateway_state(topic):
         success, mid = publish(topic, payload, 0)
         time.sleep(300)
 
-def thread_loop_sensor(topic):
+def thread_loop_sensor_publish(topic):
+    conn = Client(
+        (client_host, client_post), 
+        authkey=client_passwd.encode()
+    )
+    
     gpio_pin = 4
 
     last_h = 0
@@ -306,8 +322,6 @@ def thread_loop_sensor(topic):
     while True:
         try:
             h,t = adafruit.read_retry(adafruit.DHT22, gpio_pin)
-
-            print(h,t)
 
             flag_h = 0
             flag_t = 0
@@ -338,12 +352,34 @@ def thread_loop_sensor(topic):
                 flag_t
             )
 
-            success, mid = publish(topic, payload)
+            data = {
+                'topic' : topic,
+                'payload' : payload,
+            }
+
+            conn.send(json.dumps(data))
 
         except Exception as e:
             logger.exception('there was an error, check the stacktrace...')
 
         time.sleep(1)
+    
+    conn.send('close connection')
+    conn.close()
+
+def thread_loop_sensor_listener(topic):
+    listener = Listener(
+        (client_host, client_post), 
+        authkey=client_passwd.encode()
+    )
+
+    running = True
+    while running:
+        conn = listener.accept()
+        print('connection accepted from', listener.last_accepted)
+        while True:
+            data = json.loads(conn.recv())
+            logger.info(data)
 
 def thread_loop_image():
     bucket_name = 'danarchy-io'
@@ -534,7 +570,8 @@ def setup_subscribe(client, device, qos, subtopic, callback):
 
 def setup_threads():
     global thread_gateway_state
-    global thread_sensor_events
+    global thread_sensor_listener
+    global thread_sensor_publish
     global thread_image_events
 
     # gateway state
@@ -547,15 +584,25 @@ def setup_threads():
         )
         thread_gateway_state.start()
 
-    # sensor
+    # sensor listener
 
-    if not thread_sensor_events:
-        thread_sensor_events = threading.Thread(
-            name='thread_sensor_events',
-            target=thread_loop_sensor, 
+    if not thread_sensor_listener
+        thread_sensor_listener = threading.Thread(
+            name='thread_loop_sensor_listener',
+            target=thread_loop_sensor_listener, 
             args=('/devices/{}/{}'.format('sensor', 'events'),)
         )
-        thread_sensor_events.start()
+        thread_sensor_listener.start()
+    
+    # sensor publish
+
+    if not thread_sensor_publish:
+        thread_sensor_publish = Process(
+            name='thread_loop_sensor_publish',
+            target=thread_loop_sensor_publish, 
+            args=('/devices/{}/{}'.format('sensor', 'events'),)
+        )
+        thread_sensor_publish.start()
 
     # images
 
