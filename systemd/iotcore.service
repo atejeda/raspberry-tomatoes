@@ -1,0 +1,11 @@
+[Unit]
+Description=iotcore
+
+[Service]
+User=pi
+WorkingDirectory=/opt/iotcore
+ExecStart=bin/iotcore --private-key keys/private.pem --expire 3600
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
