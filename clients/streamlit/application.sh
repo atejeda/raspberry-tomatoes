@@ -11,5 +11,5 @@ cd ${BASEPATH} && ${STREAMLIT} \
         --browser.serverAddress="0.0.0.0" \
         --server.enableCORS=false \
         --server.headless=true \
-        --server.port=8080 \
+        --server.port=80 \
         2>&1

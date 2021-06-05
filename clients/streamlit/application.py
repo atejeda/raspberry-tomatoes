@@ -48,7 +48,7 @@ query = '''
     FROM
         `danarchy-io.stargaze.sensor`
     ORDER BY
-        date ASC
+        date DESC
     limit 1
 '''
 
