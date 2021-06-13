@@ -361,7 +361,7 @@ def thread_loop_sensor_publish(topic):
         except Exception as e:
             logger.exception('there was an error, check the stacktrace...')
 
-        time.sleep(5)
+        time.sleep(3)
     
     conn.send('close connection')
     conn.close()
@@ -419,6 +419,15 @@ def thread_loop_image():
         blob.upload_from_filename(image_path)
 
         logger.info('uploaded => gs://{}/{}'.format(bucket_name, blob_name))
+
+        try:
+            bucket.copy_blob(
+                blob, 
+                bucket, 
+                '{}/last.jpg'.format(bucket_path)
+            ).blob.make_public()
+        except:
+            logger.exception('while copying the image as last.jpg')
 
         time.sleep(60)
 
