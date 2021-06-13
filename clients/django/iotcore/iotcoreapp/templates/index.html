@@ -1,0 +1,15 @@
+{% load static %}
+<!DOCTYPE html>
+<html>
+	<head>
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	</head>
+	<body>
+		<h2> {{ date }} </h2>
+		<h2>temperature = {{ temperature }}° / humidity = {{ humidity }}%</h2>
+		ft =  {{ flagt }} / fh = {{ flagh }}
+		<br>
+		<img src="{% static "image.jpg" %}" style="max-width: 100%">
+	</body>
+</html>
+

@@ -13,6 +13,8 @@ from colour import Color
 from altair.expr import datum
 from google.cloud import bigquery
 
+from PIL import Image
+
 client = bigquery.Client()
 
 # load data index
@@ -56,4 +58,6 @@ df = fetch(query)
 
 st.dataframe(df.T)
 
-st.image('https://storage.cloud.google.com/danarchy-io/iotcore/images/last.jpg')
+#st.image('https://storage.cloud.google.com/danarchy-io/iotcore/images/last.jpg')
+
+st.image(Image.open('last.jpg'))
